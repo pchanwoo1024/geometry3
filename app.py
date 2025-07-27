@@ -9,7 +9,7 @@ from PIL import Image
 FOOD_DB = {
     "world_cone": {
         "name_kr": "월드콘",
-        "geometry": {"circularity": 0.50, "aspect_ratio": 0.45},
+        "geometry": {"circularity": 0.35, "aspect_ratio": 0.30},
         "nutrition": {"열량":"255 kcal","나트륨":"85 mg","탄수화물":"30 g","당류":"20 g","지방":"13 g","포화지방":"9 g","단백질":"4 g"},
         "allergies": ["대두","밀","우유","땅콩"]
     },
