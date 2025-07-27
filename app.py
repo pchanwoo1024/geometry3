@@ -56,12 +56,10 @@ def order_points(pts):
     return rect
 
 
-def rectify_perspective(img_array, debug=False):
-    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+def rectify_perspective(img, debug=False):
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
     edged = cv2.Canny(gray, 50, 150)
     contours, _ = cv2.findContours(edged, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-    debug_img = None
     for c in sorted(contours, key=cv2.contourArea, reverse=True):
         peri = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
@@ -75,107 +73,104 @@ def rectify_perspective(img_array, debug=False):
             heightA = np.linalg.norm(tr - br)
             heightB = np.linalg.norm(tl - bl)
             maxH = int(max(heightA, heightB))
-            dst = np.array([[0, 0], [maxW - 1, 0], [maxW - 1, maxH - 1], [0, maxH - 1]], dtype="float32")
+            dst = np.array([[0, 0], [maxW-1, 0], [maxW-1, maxH-1], [0, maxH-1]], dtype="float32")
             M = cv2.getPerspectiveTransform(rect, dst)
-            warped = cv2.warpPerspective(img_array, M, (maxW, maxH))
+            warped = cv2.warpPerspective(img, M, (maxW, maxH))
+            debug_img = None
             if debug:
-                debug_img = img_array.copy()
-                cv2.drawContours(debug_img, [approx], -1, (0, 255, 0), 3)
+                debug_img = img.copy()
+                cv2.drawContours(debug_img, [approx], -1, (0,255,0), 3)
             return warped, debug_img
-
-    # 못 찾으면 원본 반환
-    return img_array, debug_img
+    return img, None
 
 
-def calculate_geometric_features(
-    img_array, thresh_val=60, method="Fixed", debug=False
-):
-    gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    kernel = np.ones((5, 5), np.uint8)
-    closed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
+def segment_object_grabcut(img, iter_count=5):
+    mask = np.zeros(img.shape[:2], np.uint8)
+    bgd, fgd = np.zeros((1,65), np.float64), np.zeros((1,65), np.float64)
+    h, w = img.shape[:2]
+    rect = (2, 2, w-4, h-4)
+    cv2.grabCut(img, mask, rect, bgd, fgd, iter_count, cv2.GC_INIT_WITH_RECT)
+    fg = np.where((mask==2)|(mask==0), 0, 1).astype('uint8')
+    return img * fg[:,:,None]
 
-    # 1. Threshold 선택
-    if method == "Fixed":
-        _, thresh = cv2.threshold(closed, thresh_val, 255, cv2.THRESH_BINARY_INV)
-    elif method == "Otsu":
-        _, thresh = cv2.threshold(
-            closed, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
-        )
-    else:  # Adaptive
-        thresh = cv2.adaptiveThreshold(
-            closed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 11, 2
-        )
 
+def calculate_geometric_features(img, debug=False):
+    # 1) GrabCut 으로 전경 분리
+    segmented = segment_object_grabcut(img, iter_count=5)
+
+    # 2) 전처리 → Otsu 이진화
+    gray    = cv2.cvtColor(segmented, cv2.COLOR_RGB2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5,5), 0)
+    closed  = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
+    _, thresh = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)
+
+    # 3) 윤곽선 검출
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None, None, None
 
-    main_contour = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(main_contour)
-    peri = cv2.arcLength(main_contour, True)
-    x, y, w, h = cv2.boundingRect(main_contour)
-    if peri == 0 or h == 0:
+    main = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(main)
+    peri = cv2.arcLength(main, True)
+    x,y,w,h = cv2.boundingRect(main)
+    if peri==0 or h==0:
         return None, None, None
 
-    circularity = (4 * np.pi * area) / (peri ** 2)
-    aspect_ratio = w / h
+    circ = (4*np.pi*area)/(peri**2)
+    ar   = w/h
 
     debug_img = None
     if debug:
-        debug_img = img_array.copy()
-        cv2.drawContours(debug_img, [main_contour], -1, (0, 255, 0), 2)
+        debug_img = img.copy()
+        cv2.drawContours(debug_img, [main], -1, (0,255,0), 2)
 
-    return circularity, aspect_ratio, debug_img
+    return circ, ar, debug_img
 
 
-def identify_food(circularity, aspect_ratio):
-    min_err, best = float("inf"), None
+def identify_food(circ, ar):
+    best, min_err = None, float('inf')
     for k, d in FOOD_DB.items():
-        err = abs(circularity - d["geometry"]["circularity"]) + abs(aspect_ratio - d["geometry"]["aspect_ratio"])
+        err = abs(circ - d["geometry"]["circularity"]) + abs(ar - d["geometry"]["aspect_ratio"])
         if err < min_err:
             min_err, best = err, k
     return best
 
 
 # —————— Streamlit UI ——————
-st.title("📸 식품 영양 분석기 (향상된 객체 검출)")
-st.write("▶ 원근 보정 + 여러 임계치 방식 지원 + 디버그 출력")
-st.sidebar.header("Threshold 세팅")
-method = st.sidebar.selectbox("방식 선택", ["Fixed", "Otsu", "Adaptive"])
-th = st.sidebar.slider("Fixed Threshold 값", 0, 255, 60) if method == "Fixed" else None
+st.title("📸 식품 영양 분석기 (GrabCut Segmentation)")
+st.write("GrabCut + Otsu 이진화 → 정확한 외곽선 추출을 사용합니다.")
+st.info("정면에서 찍은 포장지 사진에서 외곽선을 안정적으로 검출합니다.")
 
-uploaded = st.file_uploader("사진 업로드...", type=["jpg", "jpeg", "png"])
+uploaded = st.file_uploader("사진 업로드...", type=["jpg","jpeg","png"])
 if not uploaded:
     st.stop()
 
 pil_img = Image.open(uploaded).convert("RGB")
-orig = np.array(pil_img)
+orig    = np.array(pil_img)
 
-# 1) Perspective 보정
-warped, dbg_rect = rectify_perspective(orig, debug=True)
+# 1) 사영 보정 (옵션)
+warped, debug_rect = rectify_perspective(orig, debug=True)
 
-# 2) 특징 계산
-circ, ar, dbg_cnt = calculate_geometric_features(warped, th or 0, method, debug=True)
+# 2) 특징 계산 (GrabCut + Otsu)
+circ, ar, debug_cnt = calculate_geometric_features(warped, debug=True)
 
 col1, col2 = st.columns(2)
 with col1:
-    st.subheader("원본")
+    st.subheader("원본 이미지")
     st.image(pil_img, use_container_width=True)
-    if dbg_rect is not None:
+
+    if debug_rect is not None:
         st.subheader("검출된 사각형")
-        st.image(Image.fromarray(dbg_rect), use_container_width=True)
-    st.subheader("보정된 이미지")
-    st.image(Image.fromarray(warped), use_container_width=True)
-    if dbg_cnt is not None:
-        st.subheader("검출된 윤곽선")
-        st.image(Image.fromarray(dbg_cnt), use_container_width=True)
+        st.image(Image.fromarray(debug_rect), use_container_width=True)
+
+    st.subheader("GrabCut 분리 후")
+    if debug_cnt is not None:
+        st.image(Image.fromarray(debug_cnt), use_container_width=True)
 
 with col2:
-    st.subheader("분석")
+    st.subheader("분석 결과")
     if circ is None:
-        st.error("객체를 인식하지 못했습니다. Threshold 방식을 바꿔 보세요.")
+        st.error("객체를 인식하지 못했습니다.")
     else:
         st.write(f"- Circularity: **{circ:.3f}**")
         st.write(f"- Aspect Ratio: **{ar:.3f}**")
