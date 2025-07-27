@@ -66,7 +66,7 @@ def rectify_perspective(img, debug=False):
         if len(approx) == 4:
             pts = approx.reshape(4, 2).astype("float32")
             rect = order_points(pts)
-            (tl, tr, br, bl) = rect
+            tl, tr, br, bl = rect
             widthA = np.linalg.norm(br - bl)
             widthB = np.linalg.norm(tr - tl)
             maxW = int(max(widthA, widthB))
@@ -85,20 +85,25 @@ def rectify_perspective(img, debug=False):
 
 
 def segment_object_grabcut(img, iter_count=5):
-    mask = np.zeros(img.shape[:2], np.uint8)
-    bgd, fgd = np.zeros((1,65), np.float64), np.zeros((1,65), np.float64)
-    h, w = img.shape[:2]
+    # OpenCV는 BGR 기반이므로 BGR로 변환
+    bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    mask = np.zeros(bgr.shape[:2], np.uint8)
+    bgd = np.zeros((1,65), np.float64)
+    fgd = np.zeros((1,65), np.float64)
+    h, w = bgr.shape[:2]
     rect = (2, 2, w-4, h-4)
-    cv2.grabCut(img, mask, rect, bgd, fgd, iter_count, cv2.GC_INIT_WITH_RECT)
-    fg = np.where((mask==2)|(mask==0), 0, 1).astype('uint8')
-    return img * fg[:,:,None]
+    cv2.grabCut(bgr, mask, rect, bgd, fgd, iter_count, cv2.GC_INIT_WITH_RECT)
+    fg_mask = np.where((mask==2)|(mask==0), 0, 1).astype("uint8")
+    segmented_bgr = bgr * fg_mask[:,:,None]
+    # 다시 RGB로 돌려서 리턴
+    return cv2.cvtColor(segmented_bgr, cv2.COLOR_BGR2RGB)
 
 
 def calculate_geometric_features(img, debug=False):
-    # 1) GrabCut 으로 전경 분리
+    # 1) GrabCut 분리
     segmented = segment_object_grabcut(img, iter_count=5)
 
-    # 2) 전처리 → Otsu 이진화
+    # 2) 전처리 + Otsu
     gray    = cv2.cvtColor(segmented, cv2.COLOR_RGB2GRAY)
     blurred = cv2.GaussianBlur(gray, (5,5), 0)
     closed  = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, np.ones((5,5),np.uint8))
@@ -128,7 +133,7 @@ def calculate_geometric_features(img, debug=False):
 
 
 def identify_food(circ, ar):
-    best, min_err = None, float('inf')
+    best, min_err = None, float("inf")
     for k, d in FOOD_DB.items():
         err = abs(circ - d["geometry"]["circularity"]) + abs(ar - d["geometry"]["aspect_ratio"])
         if err < min_err:
@@ -137,9 +142,9 @@ def identify_food(circ, ar):
 
 
 # —————— Streamlit UI ——————
-st.title("📸 식품 영양 분석기 (GrabCut Segmentation)")
-st.write("GrabCut + Otsu 이진화 → 정확한 외곽선 추출을 사용합니다.")
-st.info("정면에서 찍은 포장지 사진에서 외곽선을 안정적으로 검출합니다.")
+st.title("📸 식품 영양 분석기 (GrabCut Segmentation 🚀)")
+st.write("GrabCut → Otsu 이진화 → 정확한 외곽선 추출")
+st.info("정면으로 찍은 포장지 사진에서 안정적인 contour 검출")
 
 uploaded = st.file_uploader("사진 업로드...", type=["jpg","jpeg","png"])
 if not uploaded:
@@ -151,26 +156,25 @@ orig    = np.array(pil_img)
 # 1) 사영 보정 (옵션)
 warped, debug_rect = rectify_perspective(orig, debug=True)
 
-# 2) 특징 계산 (GrabCut + Otsu)
+# 2) 특징 추출
 circ, ar, debug_cnt = calculate_geometric_features(warped, debug=True)
 
 col1, col2 = st.columns(2)
 with col1:
     st.subheader("원본 이미지")
     st.image(pil_img, use_container_width=True)
-
     if debug_rect is not None:
         st.subheader("검출된 사각형")
         st.image(Image.fromarray(debug_rect), use_container_width=True)
 
-    st.subheader("GrabCut 분리 후")
+    st.subheader("GrabCut → 분리된 전경+검출 윤곽선")
     if debug_cnt is not None:
         st.image(Image.fromarray(debug_cnt), use_container_width=True)
 
 with col2:
     st.subheader("분석 결과")
     if circ is None:
-        st.error("객체를 인식하지 못했습니다.")
+        st.error("객체 검출 실패 — 사진을 교체하거나 다시 찍어 보세요.")
     else:
         st.write(f"- Circularity: **{circ:.3f}**")
         st.write(f"- Aspect Ratio: **{ar:.3f}**")
@@ -187,4 +191,4 @@ with col2:
                 else:
                     st.info("등록된 알레르기 정보가 없습니다.")
         else:
-            st.error("데이터베이스에서 일치하는 과자를 찾지 못했습니다.")
+            st.error("데이터베이스 매칭 실패")
