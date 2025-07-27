@@ -57,11 +57,6 @@ def order_points(pts):
 
 
 def rectify_perspective(img_array, debug=False):
-    """
-    - 입력 NumPy 이미지에서 가장 큰 4각형 윤곽을 찾아
-    - 원근 보정(homography)으로 사영 이미지를 반환합니다.
-    - debug=True 시, 검출된 사각형 외곽을 그려둔 디버그 이미지도 함께 반환합니다.
-    """
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     edged = cv2.Canny(gray, 50, 150)
     contours, _ = cv2.findContours(edged, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -71,7 +66,7 @@ def rectify_perspective(img_array, debug=False):
         peri = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
         if len(approx) == 4:
-            pts = approx.reshape(4, 2)
+            pts = approx.reshape(4, 2).astype("float32")
             rect = order_points(pts)
             (tl, tr, br, bl) = rect
             widthA = np.linalg.norm(br - bl)
@@ -88,22 +83,30 @@ def rectify_perspective(img_array, debug=False):
                 cv2.drawContours(debug_img, [approx], -1, (0, 255, 0), 3)
             return warped, debug_img
 
-    # 사영 보정 실패 시 원본 반환
+    # 못 찾으면 원본 반환
     return img_array, debug_img
 
 
-def calculate_geometric_features(img_array, debug=False):
-    """
-    - 이미지에서 외곽선을 찾아
-    - 원형도와 가로세로 비율을 계산합니다.
-    - debug=True 시, 검사된 윤곽선을 그린 디버그 이미지를 반환합니다.
-    """
+def calculate_geometric_features(
+    img_array, thresh_val=60, method="Fixed", debug=False
+):
     gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    # 모폴로지 클로징으로 구멍 메우기
     kernel = np.ones((5, 5), np.uint8)
     closed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
-    _, thresh = cv2.threshold(closed, 60, 255, cv2.THRESH_BINARY_INV)
+
+    # 1. Threshold 선택
+    if method == "Fixed":
+        _, thresh = cv2.threshold(closed, thresh_val, 255, cv2.THRESH_BINARY_INV)
+    elif method == "Otsu":
+        _, thresh = cv2.threshold(
+            closed, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
+        )
+    else:  # Adaptive
+        thresh = cv2.adaptiveThreshold(
+            closed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 11, 2
+        )
 
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -121,77 +124,69 @@ def calculate_geometric_features(img_array, debug=False):
 
     debug_img = None
     if debug:
-        debug_img = cv2.cvtColor(img_array.copy(), cv2.COLOR_RGB2BGR)
+        debug_img = img_array.copy()
         cv2.drawContours(debug_img, [main_contour], -1, (0, 255, 0), 2)
-        debug_img = cv2.cvtColor(debug_img, cv2.COLOR_BGR2RGB)
 
     return circularity, aspect_ratio, debug_img
 
 
 def identify_food(circularity, aspect_ratio):
-    min_error = float("inf")
-    best_key = None
-    for key, data in FOOD_DB.items():
-        db_circ = data["geometry"]["circularity"]
-        db_ar = data["geometry"]["aspect_ratio"]
-        error = abs(circularity - db_circ) + abs(aspect_ratio - db_ar)
-        if error < min_error:
-            min_error = error
-            best_key = key
-    return best_key
+    min_err, best = float("inf"), None
+    for k, d in FOOD_DB.items():
+        err = abs(circularity - d["geometry"]["circularity"]) + abs(aspect_ratio - d["geometry"]["aspect_ratio"])
+        if err < min_err:
+            min_err, best = err, k
+    return best
 
 
 # —————— Streamlit UI ——————
-st.title("📸 식품 영양 분석기 (원근 보정 + 디버그)")
-st.write("Homography 보정과 모폴로지 후처리로 객체 검출 정확도를 개선했습니다.")
-st.info("정면에서 찍은 사진일수록, 가장 큰 사각형 윤곽을 올바르게 찾아냅니다.")
+st.title("📸 식품 영양 분석기 (향상된 객체 검출)")
+st.write("▶ 원근 보정 + 여러 임계치 방식 지원 + 디버그 출력")
+st.sidebar.header("Threshold 세팅")
+method = st.sidebar.selectbox("방식 선택", ["Fixed", "Otsu", "Adaptive"])
+th = st.sidebar.slider("Fixed Threshold 값", 0, 255, 60) if method == "Fixed" else None
 
-uploaded_file = st.file_uploader("📂 사진 업로드...", type=["jpg", "jpeg", "png"])
-if not uploaded_file:
+uploaded = st.file_uploader("사진 업로드...", type=["jpg", "jpeg", "png"])
+if not uploaded:
     st.stop()
 
-# 원본 PIL → NumPy
-pil_img = Image.open(uploaded_file).convert("RGB")
+pil_img = Image.open(uploaded).convert("RGB")
 orig = np.array(pil_img)
 
-# 1) 원근 보정
-warped, debug_rect = rectify_perspective(orig, debug=True)
+# 1) Perspective 보정
+warped, dbg_rect = rectify_perspective(orig, debug=True)
 
-# 2) 특징 계산 (warped 기준)
-circularity, aspect_ratio, debug_contour = calculate_geometric_features(warped, debug=True)
+# 2) 특징 계산
+circ, ar, dbg_cnt = calculate_geometric_features(warped, th or 0, method, debug=True)
 
 col1, col2 = st.columns(2)
-
 with col1:
-    st.subheader("원본 이미지")
+    st.subheader("원본")
     st.image(pil_img, use_container_width=True)
-
-    if debug_rect is not None:
-        st.subheader("사영 보정 (검출된 사각형)")
-        st.image(Image.fromarray(debug_rect), use_container_width=True)
-
-    st.subheader("보정 후 이미지")
+    if dbg_rect is not None:
+        st.subheader("검출된 사각형")
+        st.image(Image.fromarray(dbg_rect), use_container_width=True)
+    st.subheader("보정된 이미지")
     st.image(Image.fromarray(warped), use_container_width=True)
-
-    if debug_contour is not None:
-        st.subheader("검출된 외곽선 (디버그)")
-        st.image(Image.fromarray(debug_contour), use_container_width=True)
+    if dbg_cnt is not None:
+        st.subheader("검출된 윤곽선")
+        st.image(Image.fromarray(dbg_cnt), use_container_width=True)
 
 with col2:
-    st.subheader("분석 결과")
-    if circularity is None:
-        st.error("객체를 인식하지 못했습니다.")
+    st.subheader("분석")
+    if circ is None:
+        st.error("객체를 인식하지 못했습니다. Threshold 방식을 바꿔 보세요.")
     else:
-        st.write(f"- 원형도 (Circularity): **{circularity:.3f}**")
-        st.write(f"- 가로세로 비 (Aspect Ratio): **{aspect_ratio:.3f}**")
-        key = identify_food(circularity, aspect_ratio)
+        st.write(f"- Circularity: **{circ:.3f}**")
+        st.write(f"- Aspect Ratio: **{ar:.3f}**")
+        key = identify_food(circ, ar)
         if key:
             info = FOOD_DB[key]
             st.success(f"이 과자는 **{info['name_kr']}** 로 추정됩니다!")
-            with st.expander("✅ 영양 정보"):
-                for nut, val in info["nutrition"].items():
-                    st.write(f"{nut}: {val}")
-            with st.expander("⚠️ 알레르기 정보"):
+            with st.expander("영양 정보"):
+                for n, v in info["nutrition"].items():
+                    st.write(f"{n}: {v}")
+            with st.expander("알레르기 정보"):
                 if info["allergies"]:
                     st.warning(", ".join(info["allergies"]))
                 else:
