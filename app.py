@@ -21,7 +21,7 @@ FOOD_DB = {
     },
     "demi_soda": {
         "name_kr": "데미소다 애플",
-        "geometry": {"circularity": 0.70, "aspect_ratio": 0.55},
+        "geometry": {"circularity": 0.65, "aspect_ratio": 0.40},
         "nutrition": {"열량":"125 kcal","나트륨":"25 mg","탄수화물":"31 g","당류":"31 g"},
         "allergies": ["사과농축과즙 함유"]
     },
