@@ -105,8 +105,8 @@ def identify_food(circ: float, ar: float) -> str | None:
 
 
 # —————— Streamlit UI ——————
-st.title("📸 식품 영양 분석기 (Contour 기반)")
-st.info("Adaptive Threshold + Closing → 안정적 외곽선 검출")
+st.title("📸 푸드 스캐너")
+st.info("사진을 최대한 정면 방향으로 찍어주세요.")
 
 uploaded = st.file_uploader("사진 업로드", type=["jpg","jpeg","png"])
 if not uploaded:
