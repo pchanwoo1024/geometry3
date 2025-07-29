@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import cv2
 import numpy as np
@@ -33,68 +31,49 @@ FOOD_DB = {
     }
 }
 
+# —————— PCA 결과 ——————
+PCA_RESULTS = {
+    "world_cone":   {"PCA1": -1.793, "PCA2": -1.627},
+    "bbungtwigi":   {"PCA1":  3.080, "PCA2":  0.141},
+    "demi_soda":    {"PCA1": -1.289, "PCA2":  2.601},
+    "jolly_pong":   {"PCA1":  0.002, "PCA2": -1.115}
+}
 
-def detect_main_contour(
-    rgb_image: np.ndarray,
-    debug: bool = False
-) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """
-    Adaptive Threshold + Closing → 외곽선 검출
-    Returns:
-      main_contour, debug_img (RGB with contour drawn)
-    """
+# —————— 함수 정의 ——————
+def detect_main_contour(rgb_image, debug=False):
     try:
-        gray    = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY)
+        gray = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2GRAY)
         blurred = cv2.GaussianBlur(gray, (5,5), 0)
-        thresh  = cv2.adaptiveThreshold(
-            blurred, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,
-            blockSize=11, C=2
-        )
+        thresh = cv2.adaptiveThreshold(blurred, 255,
+                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 11, 2)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
         closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-
-        contours, _ = cv2.findContours(
-            closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None, None
-
         main = max(contours, key=cv2.contourArea)
-        debug_img = None
+        debug_img = rgb_image.copy() if debug else None
         if debug:
-            debug_img = rgb_image.copy()
             cv2.drawContours(debug_img, [main], -1, (0,255,0), 2)
         return main, debug_img
-
     except Exception:
         return None, None
 
-
-def extract_features(
-    img: np.ndarray,
-    debug: bool = False
-) -> tuple[float | None, float | None, np.ndarray | None]:
-    """
-    contour → circularity, aspect_ratio 계산
-    """
+def extract_features(img, debug=False):
     contour, debug_img = detect_main_contour(img, debug)
     if contour is None:
         return None, None, None
-
     area = cv2.contourArea(contour)
     peri = cv2.arcLength(contour, True)
-    x,y,w,h = cv2.boundingRect(contour)
+    x, y, w, h = cv2.boundingRect(contour)
     if peri == 0 or h == 0:
         return None, None, None
-
     circ = (4 * np.pi * area) / (peri**2)
-    ar   = w / h
+    ar = w / h
     return circ, ar, debug_img
 
-
-def identify_food(circ: float, ar: float) -> str | None:
+def identify_food(circ, ar):
     best, min_err = None, float("inf")
     for k, v in FOOD_DB.items():
         db_c, db_ar = v["geometry"]["circularity"], v["geometry"]["aspect_ratio"]
@@ -103,6 +82,17 @@ def identify_food(circ: float, ar: float) -> str | None:
             min_err, best = err, k
     return best
 
+def pca_health_feedback(pca1, pca2):
+    if pca1 < -1.5:
+        return "⚠️ 당과 포화지방이 많아 심혈관 건강에 유의해야 합니다."
+    elif pca1 > 2.5:
+        return "✅ 지방과 나트륨이 낮고, 에너지 공급에 유리한 간식입니다."
+    elif pca2 > 2:
+        return "⚠️ 당 함량이 매우 높아 혈당 급등을 유발할 수 있습니다."
+    elif -1 < pca1 < 1:
+        return "⚠️ 열량과 당, 나트륨이 골고루 있어 과잉섭취 시 주의가 필요합니다."
+    else:
+        return "ℹ️ 중간 수준의 영양 구성을 갖고 있습니다."
 
 # —————— Streamlit UI ——————
 st.title("📸 푸드 스캐너")
@@ -136,6 +126,7 @@ with col2:
         if key:
             info = FOOD_DB[key]
             st.success(f"예측: **{info['name_kr']}**")
+
             with st.expander("영양 정보"):
                 for n, v in info["nutrition"].items():
                     st.write(f"{n}: {v}")
@@ -144,5 +135,13 @@ with col2:
                     st.warning(", ".join(info["allergies"]))
                 else:
                     st.info("등록된 알레르기 정보가 없습니다.")
+
+            # PCA 결과 시각화
+            if key in PCA_RESULTS:
+                p1 = PCA_RESULTS[key]["PCA1"]
+                p2 = PCA_RESULTS[key]["PCA2"]
+                st.markdown("### 🔍 PCA 기반 영양 프로파일")
+                st.write(f"- PCA1: `{p1:.3f}` / PCA2: `{p2:.3f}`")
+                st.info(pca_health_feedback(p1, p2))
         else:
             st.error("데이터베이스 매칭 실패")
